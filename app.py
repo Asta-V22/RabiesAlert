@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-import base64, io, pickle, os
+import base64, io, os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -9,10 +9,13 @@ import torchvision.transforms as T
 import torchvision.models as models
 from PIL import Image
 
+import db  # Neon PostgreSQL helper
+
 app = Flask(__name__)
 CORS(app)
 
-# Model Definition
+
+# ── Model Definition ──────────────────────────────────────────────────────────
 
 class EmbeddingNet(nn.Module):
     def __init__(self, backbone='resnet50', embedding_dim=128):
@@ -47,12 +50,11 @@ class TripletNet(nn.Module):
         return self.emb_net(x)
 
 
-# Loading Model & Database
+# ── Load Model ────────────────────────────────────────────────────────────────
 
 DEVICE     = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 MODEL_PATH = os.path.join(os.path.dirname(__file__), 'best_model.pth')
-DB_PATH    = os.path.join(os.path.dirname(__file__), 'embeddings_db.pkl')
-THRESHOLD  = 0.9
+THRESHOLD  = 1.3
 
 model = TripletNet(backbone='resnet50', embedding_dim=128).to(DEVICE)
 ckpt  = torch.load(MODEL_PATH, map_location=DEVICE)
@@ -60,16 +62,16 @@ model.load_state_dict(ckpt['model_state'])
 model.eval()
 print(f"✅ Model loaded — epoch {ckpt['epoch']}, val_loss={ckpt.get('val_loss', '?')}")
 
-with open(DB_PATH, 'rb') as f:
-    embedding_db = pickle.load(f)
-print(f"✅ Embedding DB loaded — {len(embedding_db)} dogs registered")
-
 if 'threshold' in ckpt:
     THRESHOLD = ckpt['threshold']
     print(f"✅ Threshold from checkpoint: {THRESHOLD}")
 
+# ── Init Neon DB ──────────────────────────────────────────────────────────────
 
-# Image Transform 
+db.init_db()
+
+
+# ── Image Transform ───────────────────────────────────────────────────────────
 
 infer_transform = T.Compose([
     T.Resize((160, 160)),
@@ -79,7 +81,7 @@ infer_transform = T.Compose([
 ])
 
 
-#  Helper Functions 
+# ── Helper Functions ──────────────────────────────────────────────────────────
 
 @torch.no_grad()
 def extract_embedding(pil_img):
@@ -88,34 +90,28 @@ def extract_embedding(pil_img):
     return emb.astype(np.float32)
 
 
-def get_mean_embedding(dog_name):
-    embs = np.stack(embedding_db[dog_name], axis=0)
-    mean = embs.mean(axis=0)
-    return (mean / (np.linalg.norm(mean) + 1e-8)).astype(np.float32)
-
-
 def decode_image(b64_string):
-    # Strip data URI prefix if present (e.g. "data:image/jpeg;base64,...")
+    """Accept raw base64 or data-URI base64."""
     if ',' in b64_string:
         b64_string = b64_string.split(',')[1]
     img_bytes = base64.b64decode(b64_string)
     return Image.open(io.BytesIO(img_bytes))
 
 
-# Routes 
+# ── Routes ────────────────────────────────────────────────────────────────────
 
 @app.route('/')
 def index():
-    return send_from_directory('templates','index.html')
+    return send_from_directory('templates', 'index.html')
 
 
 @app.route('/health')
 def health():
     return jsonify({
-        'status':      'ok',
-        'dogs_in_db':  len(embedding_db),
-        'device':      str(DEVICE),
-        'threshold':   THRESHOLD,
+        'status':     'ok',
+        'dogs_in_db': db.count_dogs(),
+        'device':     str(DEVICE),
+        'threshold':  THRESHOLD,
     })
 
 
@@ -132,19 +128,14 @@ def predict():
 
     query_emb = extract_embedding(pil_img)
 
-    # Compare against every registered dog
-    results = []
-    for dog_name in embedding_db:
-        avg_emb = get_mean_embedding(dog_name)
-        dist    = float(np.linalg.norm(query_emb - avg_emb))
-        results.append({'name': dog_name, 'distance': round(dist, 4)})
-
-    results.sort(key=lambda x: x['distance'])
+    # Query Neon for nearest neighbours
+    results = db.search_nearest(query_emb, top_k=5)
 
     if not results:
         return jsonify({
             'is_known':     False,
             'matched_name': None,
+            'matched_id':   None,
             'confidence':   0.0,
             'distance':     None,
             'threshold':    THRESHOLD,
@@ -155,52 +146,84 @@ def predict():
     is_known  = best['distance'] < THRESHOLD
     confidence = round(max(0.0, 1.0 - best['distance'] / THRESHOLD), 4)
 
+    # If matched, fetch full dog profile from DB
+    dog_profile = None
+    if is_known:
+        dog_profile = db.get_dog(best['dog_id'])
+
     return jsonify({
         'is_known':     bool(is_known),
         'matched_name': best['name'] if is_known else None,
+        'matched_id':   best['dog_id'] if is_known else None,
         'confidence':   confidence,
-        'distance':     best['distance'],
+        'distance':     round(best['distance'], 4),
         'threshold':    THRESHOLD,
-        'top_k':        results[:3],
+        'top_k':        [
+            {'name': r['name'], 'distance': round(r['distance'], 4)}
+            for r in results[:3]
+        ],
+        'dog_profile':  dog_profile,
     })
 
 
 @app.route('/register', methods=['POST'])
 def register():
     data = request.get_json()
-    if not data or 'image_b64' not in data or 'dog_name' not in data:
-        return jsonify({'error': 'Missing image_b64 or dog_name'}), 400
+    if not data or 'image_b64' not in data or 'name' not in data:
+        return jsonify({'error': 'Missing image_b64 or name'}), 400
 
     try:
         pil_img = decode_image(data['image_b64'])
     except Exception as e:
         return jsonify({'error': f'Invalid image: {str(e)}'}), 400
 
-    name = data['dog_name'].strip()
-    emb  = extract_embedding(pil_img)
+    # Build profile dict from all supplied fields
+    profile = {
+        'name':             data.get('name', '').strip(),
+        'breed':            data.get('breed', 'Unknown'),
+        'dob':              data.get('dob') or None,
+        'sex':              data.get('sex', 'Unknown'),
+        'weight':           data.get('weight') or None,
+        'color':            data.get('color') or None,
+        'owner':            data.get('owner') or None,
+        'area':             data.get('area') or None,
+        'vaccinated':       bool(data.get('vaccinated', False)),
+        'rabies_vacc_date': data.get('rabies_vacc_date') or None,
+        'rabies_vacc_due':  data.get('rabies_vacc_due') or None,
+        'dhpp_date':        data.get('dhpp_date') or None,
+        'dhpp_due':         data.get('dhpp_due') or None,
+        'last_checkup':     data.get('last_checkup') or None,
+        'next_checkup':     data.get('next_checkup') or None,
+        'notes':            data.get('notes') or None,
+        'photo_url':        data.get('photo_url') or None,
+    }
 
-    if name not in embedding_db:
-        embedding_db[name] = []
-    embedding_db[name].append(emb)
+    if not profile['name']:
+        return jsonify({'error': 'name cannot be empty'}), 400
 
-    # Persist updated DB to disk immediately
-    with open(DB_PATH, 'wb') as f:
-        pickle.dump(embedding_db, f, protocol=pickle.HIGHEST_PROTOCOL)
+    emb    = extract_embedding(pil_img)
+    dog_id = db.insert_dog(profile)
+    db.insert_embedding(dog_id, emb)
 
     return jsonify({
-        'success':          True,
-        'dog_name':         name,
-        'total_embeddings': len(embedding_db[name]),
-        'total_dogs':       len(embedding_db),
+        'success': True,
+        'dog_id':  dog_id,
+        'name':    profile['name'],
     })
 
 
 @app.route('/dogs')
 def list_dogs():
-    return jsonify({
-        'dogs':  list(embedding_db.keys()),
-        'count': len(embedding_db),
-    })
+    dogs = db.list_dogs()
+    return jsonify({'dogs': dogs, 'count': len(dogs)})
+
+
+@app.route('/dog/<int:dog_id>')
+def get_dog(dog_id):
+    dog = db.get_dog(dog_id)
+    if dog is None:
+        return jsonify({'error': 'Dog not found'}), 404
+    return jsonify(dog)
 
 
 @app.route('/threshold', methods=['POST'])

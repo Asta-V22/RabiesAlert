@@ -4,6 +4,7 @@
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
 <title>DogGuard — Canine Health Monitor</title>
+<meta name="description" content="AI-powered dog face recognition for rabies monitoring and canine health tracking."/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
@@ -116,55 +117,58 @@ body{background:var(--bg);color:var(--text);font-family:'DM Sans',sans-serif}
 .top-k-item:last-child{border-bottom:none}
 .model-prompt{background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:14px 16px;font-size:12px;color:var(--muted);font-family:'Source Code Pro',monospace;line-height:1.7}
 .error-box{background:rgba(192,97,74,.1);border:1px solid var(--red);border-radius:8px;padding:12px 16px;font-size:13px;color:var(--red);margin-top:12px}
+.db-badge{font-size:10px;letter-spacing:1px;text-transform:uppercase;color:var(--muted);background:var(--surface);border:1px solid var(--border);border-radius:4px;padding:2px 7px;font-family:'Source Code Pro',monospace}
 </style>
 </head>
 <body>
 <div id="root"></div>
 <script type="text/babel">
-const { useState, useRef, useCallback } = React;
+const { useState, useRef, useCallback, useEffect } = React;
 
-const BACKEND = "";  // Empty = same origin (Flask serves both frontend and backend)
+const BACKEND = "";  // same origin — Flask serves both
 
-// Helpers
+// ── Helpers ───────────────────────────────────────────────────────────────────
 const today = () => new Date().toISOString().split('T')[0];
 const daysBetween = (a,b) => { if(!a||!b) return null; return Math.round((new Date(b)-new Date(a))/86400000); };
-const dueStatus = (d) => { if(!d) return null; const diff=daysBetween(today(),d); if(diff<0) return 'overdue'; if(diff<=30) return 'soon'; return 'ok'; };
-const formatDate = (d) => { if(!d) return '—'; return new Date(d+'T00:00:00').toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}); };
+const dueStatus = d => { if(!d) return null; const diff=daysBetween(today(),d); if(diff<0) return 'overdue'; if(diff<=30) return 'soon'; return 'ok'; };
+const formatDate = d => { if(!d) return '—'; return new Date(d+'T00:00:00').toLocaleDateString('en-IN',{day:'numeric',month:'short',year:'numeric'}); };
 
-// Real ML inference — calls Flask backend 
+// ── API calls ─────────────────────────────────────────────────────────────────
+async function apiFetch(path, opts={}) {
+  const resp = await fetch(`${BACKEND}${path}`, opts);
+  if (!resp.ok) {
+    const err = await resp.json().catch(() => ({}));
+    throw new Error(err.error || `Server error ${resp.status}`);
+  }
+  return resp.json();
+}
+
 async function runInference(imageBase64) {
-  const resp = await fetch(`${BACKEND}/predict`, {
+  return apiFetch('/predict', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ image_b64: imageBase64 }),
   });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err.error || `Server error ${resp.status}`);
-  }
-  return resp.json();
 }
 
-async function registerWithBackend(dogName, imageBase64) {
-  const resp = await fetch(`${BACKEND}/register`, {
+async function registerWithBackend(profile, imageBase64) {
+  return apiFetch('/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ dog_name: dogName, image_b64: imageBase64 }),
+    body: JSON.stringify({ ...profile, image_b64: imageBase64 }),
   });
-  if (!resp.ok) {
-    const err = await resp.json().catch(() => ({}));
-    throw new Error(err.error || `Server error ${resp.status}`);
-  }
-  return resp.json();
 }
 
-//  Initial demo data 
-const DEMO_DOGS = [
-  { id:'d1', name:'Bruno', breed:'German Shepherd', dob:'2020-03-15', sex:'Male', weight:'28 kg', color:'Black & Tan', owner:'Rajesh Kumar', area:'Sector 4, Ashta', vaccinated:true, rabiesVaccDate:'2024-06-10', rabiesVaccDue:'2025-06-10', dhppDate:'2024-06-10', dhppDue:'2025-06-10', lastCheckup:'2024-12-01', nextCheckup:'2025-06-01', notes:'Friendly. Slight limping on left hind leg reported Dec 2024.', photoUrl:null, encounters:[{date:'2025-03-10',location:'Near market',note:'Identified via scan. Healthy.'}] },
-  { id:'d2', name:'Kali', breed:'Indian Pariah', dob:'2019-07-22', sex:'Female', weight:'14 kg', color:'Brown', owner:'Street (monitored)', area:'Main Bazaar, Ashta', vaccinated:true, rabiesVaccDate:'2024-02-15', rabiesVaccDue:'2025-02-15', dhppDate:'2024-02-15', dhppDue:'2025-02-15', lastCheckup:'2024-02-15', nextCheckup:'2025-02-15', notes:'Community dog. Sterilized.', photoUrl:null, encounters:[{date:'2025-02-20',location:'Main Bazaar',note:'Spotted, appears healthy.'}] },
-];
+async function fetchDogs() {
+  const data = await apiFetch('/dogs');
+  return data.dogs || [];
+}
 
-// Sub-components 
+async function fetchDogProfile(id) {
+  return apiFetch(`/dog/${id}`);
+}
+
+// ── Sub-components ────────────────────────────────────────────────────────────
 function VaccineBadge({vaccinated, dueDate, label}) {
   const st = vaccinated ? dueStatus(dueDate) : 'none';
   if(st==='overdue') return <span className="tag tag-red">⚠ {label} Overdue</span>;
@@ -173,31 +177,31 @@ function VaccineBadge({vaccinated, dueDate, label}) {
   return <span className="tag tag-red">✗ {label} Not Vaccinated</span>;
 }
 
-function DogProfile({dog, onEdit}) {
-  if(!dog) return <div className="empty"><div className="empty-icon">🐾</div><div>Select a dog or add a new one.</div></div>;
+function DogProfile({dog}) {
+  if(!dog) return <div className="empty"><div className="empty-icon">🐾</div><div>Select a dog from the sidebar or identify one via scan.</div></div>;
   const alerts = [];
   if(!dog.vaccinated) alerts.push({type:'red', msg:`${dog.name} has NOT been vaccinated — rabies risk.`});
   else {
-    const rs=dueStatus(dog.rabiesVaccDue); const cs=dueStatus(dog.nextCheckup);
-    if(rs==='overdue') alerts.push({type:'red', msg:`Rabies booster OVERDUE (was due ${formatDate(dog.rabiesVaccDue)}).`});
-    if(rs==='soon')    alerts.push({type:'warn', msg:`Rabies booster due ${formatDate(dog.rabiesVaccDue)}.`});
-    if(cs==='overdue') alerts.push({type:'red', msg:`Health checkup OVERDUE since ${formatDate(dog.nextCheckup)}.`});
-    if(cs==='soon')    alerts.push({type:'warn', msg:`Health checkup due ${formatDate(dog.nextCheckup)}.`});
+    const rs=dueStatus(dog.rabies_vacc_due||dog.rabiesVaccDue);
+    const cs=dueStatus(dog.next_checkup||dog.nextCheckup);
+    if(rs==='overdue') alerts.push({type:'red', msg:`Rabies booster OVERDUE (was due ${formatDate(dog.rabies_vacc_due||dog.rabiesVaccDue)}).`});
+    if(rs==='soon')    alerts.push({type:'warn', msg:`Rabies booster due ${formatDate(dog.rabies_vacc_due||dog.rabiesVaccDue)}.`});
+    if(cs==='overdue') alerts.push({type:'red', msg:`Health checkup OVERDUE since ${formatDate(dog.next_checkup||dog.nextCheckup)}.`});
+    if(cs==='soon')    alerts.push({type:'warn', msg:`Health checkup due ${formatDate(dog.next_checkup||dog.nextCheckup)}.`});
   }
   return (
     <div>
       <div className="dog-profile-header">
-        <div className="dog-profile-avatar">{dog.photoUrl?<img src={dog.photoUrl} alt={dog.name}/>:'🐕'}</div>
+        <div className="dog-profile-avatar">{dog.photo_url||dog.photoUrl?<img src={dog.photo_url||dog.photoUrl} alt={dog.name}/>:'🐕'}</div>
         <div style={{flex:1}}>
-          <div className="dog-profile-name">{dog.name}</div>
+          <div className="dog-profile-name">{dog.name} <span className="db-badge">Neon DB #{dog.id}</span></div>
           <div className="dog-profile-breed">{dog.breed} · {dog.sex} · Born {formatDate(dog.dob)}</div>
           <div className="dog-profile-tags">
-            <VaccineBadge vaccinated={dog.vaccinated} dueDate={dog.rabiesVaccDue} label="Rabies"/>
-            <VaccineBadge vaccinated={dog.vaccinated} dueDate={dog.dhppDue} label="DHPP"/>
-            <span className="tag tag-green" style={{opacity:.7}}>📍 {dog.area}</span>
+            <VaccineBadge vaccinated={dog.vaccinated} dueDate={dog.rabies_vacc_due||dog.rabiesVaccDue} label="Rabies"/>
+            <VaccineBadge vaccinated={dog.vaccinated} dueDate={dog.dhpp_due||dog.dhppDue} label="DHPP"/>
+            <span className="tag tag-green" style={{opacity:.7}}>📍 {dog.area||'Unknown'}</span>
           </div>
         </div>
-        <button className="btn btn-outline" onClick={()=>onEdit(dog)}>✏ Edit</button>
       </div>
       {alerts.map((a,i)=><div key={i} className={`alert alert-${a.type==='red'?'red':'warn'}`}><span>{a.type==='red'?'🚨':'⚠️'}</span><span>{a.msg}</span></div>)}
       <div className="two-col">
@@ -212,74 +216,58 @@ function DogProfile({dog, onEdit}) {
         <div className="card">
           <div className="card-title">💉 Vaccination & Health</div>
           <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
-            {[['Rabies Last',formatDate(dog.rabiesVaccDate)],['Rabies Due',formatDate(dog.rabiesVaccDue)],['DHPP Last',formatDate(dog.dhppDate)],['DHPP Due',formatDate(dog.dhppDue)],['Last Checkup',formatDate(dog.lastCheckup)],['Next Checkup',formatDate(dog.nextCheckup)]].map(([k,v])=>(
+            {[['Rabies Last',formatDate(dog.rabies_vacc_date||dog.rabiesVaccDate)],['Rabies Due',formatDate(dog.rabies_vacc_due||dog.rabiesVaccDue)],['DHPP Last',formatDate(dog.dhpp_date||dog.dhppDate)],['DHPP Due',formatDate(dog.dhpp_due||dog.dhppDue)],['Last Checkup',formatDate(dog.last_checkup||dog.lastCheckup)],['Next Checkup',formatDate(dog.next_checkup||dog.nextCheckup)]].map(([k,v])=>(
               <tr key={k}><td style={{color:'var(--muted)',padding:'5px 0',width:'50%'}}>{k}</td><td style={{padding:'5px 0',fontFamily:"'Source Code Pro',monospace",fontSize:12}}>{v}</td></tr>
             ))}
           </table>
           {dog.notes&&<div style={{marginTop:12,padding:'10px',background:'var(--surface)',borderRadius:6,fontSize:12,color:'var(--muted)',fontStyle:'italic'}}>📝 {dog.notes}</div>}
         </div>
       </div>
-      <div className="card">
-        <div className="card-title">📋 Encounter Log</div>
-        {dog.encounters&&dog.encounters.length>0?(
-          <div className="timeline">{[...dog.encounters].reverse().map((e,i)=>(
-            <div className="tl-item" key={i}>
-              <div className="tl-dot green"/>
-              <div className="tl-date">{formatDate(e.date)} · {e.location}</div>
-              <div>{e.note}</div>
-            </div>
-          ))}</div>
-        ):<div style={{color:'var(--muted)',fontSize:13}}>No encounters logged yet.</div>}
-      </div>
     </div>
   );
 }
 
-function DogForm({dog, onSave, onCancel}) {
-  const empty = {name:'',breed:'',dob:'',sex:'Male',weight:'',color:'',owner:'',area:'',vaccinated:false,rabiesVaccDate:'',rabiesVaccDue:'',dhppDate:'',dhppDue:'',lastCheckup:'',nextCheckup:'',notes:'',photoUrl:null,encounters:[]};
-  const [form,setForm] = useState(dog||empty);
+// Full registration form (used both from scan and from "Add New Dog")
+function DogForm({prefillName, prefillImg, onSave, onCancel, title}) {
+  const empty = {name:'',breed:'',dob:'',sex:'Male',weight:'',color:'',owner:'',area:'',vaccinated:false,rabies_vacc_date:'',rabies_vacc_due:'',dhpp_date:'',dhpp_due:'',last_checkup:'',next_checkup:'',notes:'',photo_url:null};
+  const [form,setForm] = useState({...empty, name: prefillName||''});
   const set = k => e => setForm(f=>({...f,[k]:e.target.value}));
   const toggle = k => () => setForm(f=>({...f,[k]:!f[k]}));
-  const handlePhoto = e => {
-    const file=e.target.files[0]; if(!file) return;
-    const reader=new FileReader();
-    reader.onload=ev=>setForm(f=>({...f,photoUrl:ev.target.result}));
-    reader.readAsDataURL(file);
-  };
   return (
     <div>
-      <div className="section-h">{dog?`Edit — ${dog.name}`:'Register New Dog'}</div>
-      <div className="section-sub">Fill in the dog's details for the health monitoring database.</div>
+      <div className="section-h">{title||'Register New Dog'}</div>
+      <div className="section-sub">Fill in the dog's details — saved directly to Neon database.</div>
+      {prefillImg&&<div style={{marginBottom:16}}><img src={prefillImg} style={{maxHeight:120,borderRadius:8,border:'2px solid var(--border)'}} alt="Dog"/></div>}
       <div className="card">
         <div className="card-title">🪪 Identity & Physical</div>
         <div className="form-grid">
-          {[['name','Name','e.g. Bruno'],['breed','Breed','e.g. Indian Pariah'],['weight','Weight','e.g. 18 kg'],['color','Coat Color','e.g. Brown with white chest'],['owner','Owner / Guardian','Name or Street'],['area','Area / Location','e.g. Ward 5, Ashta']].map(([k,l,p])=>(
+          {[['name','Name *','e.g. Bruno'],['breed','Breed','e.g. Indian Pariah'],['weight','Weight','e.g. 18 kg'],['color','Coat Colour','e.g. Brown'],['owner','Owner / Guardian','Name or "Street"'],['area','Area / Location','e.g. Ward 5, Ashta']].map(([k,l,p])=>(
             <div className="form-group" key={k}><label className="form-label">{l}</label><input className="form-input" value={form[k]} onChange={set(k)} placeholder={p}/></div>
           ))}
           <div className="form-group"><label className="form-label">Date of Birth</label><input className="form-input" type="date" value={form.dob} onChange={set('dob')}/></div>
           <div className="form-group"><label className="form-label">Sex</label><select className="form-select" value={form.sex} onChange={set('sex')}><option>Male</option><option>Female</option><option>Unknown</option></select></div>
-          <div className="form-group full"><label className="form-label">Profile Photo</label><input type="file" accept="image/*" className="form-input" style={{padding:'7px'}} onChange={handlePhoto}/>{form.photoUrl&&<img src={form.photoUrl} style={{marginTop:8,maxHeight:100,borderRadius:6}} alt="preview"/>}</div>
+          <div className="form-group full"><label className="form-label">Notes</label><textarea className="form-textarea" value={form.notes} onChange={set('notes')} placeholder="Health observations, behaviour, injuries..."/></div>
         </div>
       </div>
       <div className="card">
         <div className="card-title">💉 Vaccination & Health</div>
         <div style={{marginBottom:16}}><div className="toggle-wrap"><button className={`toggle ${form.vaccinated?'on':''}`} onClick={toggle('vaccinated')}/><span style={{fontSize:14}}>Vaccinated</span></div></div>
         <div className="form-grid">
-          {[['rabiesVaccDate','Rabies Vaccine Date'],['rabiesVaccDue','Rabies Next Due'],['dhppDate','DHPP Vaccine Date'],['dhppDue','DHPP Next Due'],['lastCheckup','Last Checkup'],['nextCheckup','Next Checkup Due']].map(([k,l])=>(
+          {[['rabies_vacc_date','Rabies Vaccine Date'],['rabies_vacc_due','Rabies Next Due'],['dhpp_date','DHPP Vaccine Date'],['dhpp_due','DHPP Next Due'],['last_checkup','Last Checkup'],['next_checkup','Next Checkup Due']].map(([k,l])=>(
             <div className="form-group" key={k}><label className="form-label">{l}</label><input className="form-input" type="date" value={form[k]} onChange={set(k)}/></div>
           ))}
-          <div className="form-group full"><label className="form-label">Notes</label><textarea className="form-textarea" value={form.notes} onChange={set('notes')} placeholder="Health observations, behaviour, injuries..."/></div>
         </div>
       </div>
       <div className="btn-row">
-        <button className="btn btn-primary" onClick={()=>onSave(form)}>💾 Save Dog</button>
+        <button className="btn btn-primary" onClick={()=>onSave(form)} disabled={!form.name.trim()}>💾 Save to Neon DB</button>
         <button className="btn btn-outline" onClick={onCancel}>Cancel</button>
       </div>
     </div>
   );
 }
 
-function ScanPage({dogs, setDogs}) {
+// ── Scan Page ─────────────────────────────────────────────────────────────────
+function ScanPage({onDogRegistered}) {
   const [imgSrc,setImgSrc]         = useState(null);
   const [imgB64,setImgB64]         = useState(null);
   const [drag,setDrag]             = useState(false);
@@ -287,18 +275,17 @@ function ScanPage({dogs, setDogs}) {
   const [result,setResult]         = useState(null);
   const [error,setError]           = useState(null);
   const [registerMode,setRegMode]  = useState(false);
-  const [newName,setNewName]       = useState('');
-  const [encounter,setEncounter]   = useState({location:'',note:''});
-  const [saved,setSaved]           = useState(false);
   const [regLoading,setRegLoading] = useState(false);
+  const [saved,setSaved]           = useState(false);
+  const [savedName,setSavedName]   = useState('');
   const fileRef = useRef();
 
   const loadFile = file => {
     if(!file) return;
-    const reader=new FileReader();
-    reader.onload=ev=>{
+    const reader = new FileReader();
+    reader.onload = ev => {
       setImgSrc(ev.target.result);
-      setImgB64(ev.target.result); // keep full data URI — backend strips prefix
+      setImgB64(ev.target.result);
       setResult(null); setError(null); setRegMode(false); setSaved(false);
     };
     reader.readAsDataURL(file);
@@ -319,21 +306,14 @@ function ScanPage({dogs, setDogs}) {
     }
   };
 
-  const logEncounter = () => {
-    if(!result||!result.matched_name) return;
-    const enc={date:today(),location:encounter.location||'Unknown',note:encounter.note||'Identified via face scan.'};
-    setDogs(prev=>prev.map(d=>d.name===result.matched_name?{...d,encounters:[...(d.encounters||[]),enc]}:d));
-    setSaved(true);
-  };
-
-  const registerNew = async () => {
-    if(!newName.trim()||!imgB64) return;
+  const handleRegister = async (formData) => {
     setRegLoading(true);
     try {
-      await registerWithBackend(newName.trim(), imgB64);
-      const newDog={id:`d${Date.now()}`,name:newName.trim(),breed:'Unknown',dob:'',sex:'Unknown',weight:'',color:'',owner:'Street (unregistered)',area:encounter.location||'Unknown',vaccinated:false,rabiesVaccDate:'',rabiesVaccDue:'',dhppDate:'',dhppDue:'',lastCheckup:'',nextCheckup:today(),notes:'Auto-registered via face scan.',photoUrl:imgSrc,encounters:[{date:today(),location:encounter.location||'Unknown',note:'First scan — registered.'}]};
-      setDogs(prev=>[...prev,newDog]);
-      setSaved(true); setRegMode(false);
+      const resp = await registerWithBackend(formData, imgB64);
+      setSaved(true);
+      setSavedName(resp.name);
+      setRegMode(false);
+      onDogRegistered(); // refresh sidebar
     } catch(e) {
       setError(e.message);
     } finally {
@@ -344,7 +324,7 @@ function ScanPage({dogs, setDogs}) {
   return (
     <div>
       <div className="section-h">🔍 Dog Face Recognition</div>
-      <div className="section-sub">Upload a photo to identify the dog against your trained Siamese model.</div>
+      <div className="section-sub">Upload a photo — the AI model computes an embedding and searches Neon DB for a match.</div>
       <div className="two-col">
         <div>
           {!imgSrc?(
@@ -368,7 +348,7 @@ function ScanPage({dogs, setDogs}) {
             </div>
           )}
 
-          {error && <div className="error-box">⚠ {error}<br/><small>Make sure Flask is running on port 5000.</small></div>}
+          {error && <div className="error-box">⚠ {error}<br/><small>Make sure Flask is running and DATABASE_URL is set in .env</small></div>}
 
           {result&&(
             <div>
@@ -376,7 +356,8 @@ function ScanPage({dogs, setDogs}) {
                 <div className="result-icon">{result.is_known?'✅':'❓'}</div>
                 <div>
                   <div className="result-name">{result.is_known?result.matched_name:'Unknown Dog'}</div>
-                  <div className="result-meta">dist={result.distance?.toFixed(4)} · τ={result.threshold?.toFixed(3)} · conf={(((result.confidence||0)*100).toFixed(1))}%</div>
+                  <div className="result-meta">dist={result.distance?.toFixed(4)} · τ={result.threshold?.toFixed(3)} · conf={((result.confidence||0)*100).toFixed(1)}%</div>
+                  {result.is_known&&<div className="result-meta">Neon DB ID #{result.matched_id}</div>}
                 </div>
               </div>
               <div className="conf-bar-wrap">
@@ -385,7 +366,7 @@ function ScanPage({dogs, setDogs}) {
               </div>
               {result.top_k?.length>0&&(
                 <div style={{marginTop:10}}>
-                  <div style={{fontSize:11,color:'var(--muted)',marginBottom:4,letterSpacing:1}}>TOP MATCHES</div>
+                  <div style={{fontSize:11,color:'var(--muted)',marginBottom:4,letterSpacing:1}}>TOP MATCHES FROM NEON</div>
                   {result.top_k.map((r,i)=>(
                     <div className="top-k-item" key={i}><span>{i+1}. {r.name}</span><span style={{color:'var(--muted)'}}>d={r.distance?.toFixed(4)}</span></div>
                   ))}
@@ -396,44 +377,46 @@ function ScanPage({dogs, setDogs}) {
         </div>
 
         <div>
-          {result&&!saved&&(
+          {/* Known dog — show profile inline */}
+          {result?.is_known && result?.dog_profile && (
             <div className="card">
-              <div className="card-title">📍 Log This Sighting</div>
-              <div className="form-grid">
-                <div className="form-group full"><label className="form-label">Location</label><input className="form-input" placeholder="e.g. Near school gate" value={encounter.location} onChange={e=>setEncounter(p=>({...p,location:e.target.value}))}/></div>
-                <div className="form-group full"><label className="form-label">Observation</label><textarea className="form-textarea" placeholder="Health observations, behaviour..." value={encounter.note} onChange={e=>setEncounter(p=>({...p,note:e.target.value}))}/></div>
-              </div>
-              <div className="btn-row">
-                {result.is_known&&<button className="btn btn-primary" onClick={logEncounter}>📋 Log Encounter</button>}
-                {!result.is_known&&<button className="btn btn-amber" onClick={()=>setRegMode(true)}>➕ Register This Dog</button>}
-              </div>
+              <div className="card-title">🐾 Matched Dog Profile</div>
+              <DogProfile dog={result.dog_profile}/>
             </div>
           )}
+
+          {/* Unknown dog — offer registration */}
+          {result&&!result.is_known&&!saved&&!registerMode&&(
+            <div className="card">
+              <div className="card-title">❓ Dog Not in Database</div>
+              <p style={{fontSize:13,color:'var(--muted)',marginBottom:16}}>
+                This dog's embedding doesn't match any record in Neon. Register it to add it to the shared database.
+              </p>
+              <button className="btn btn-amber" onClick={()=>setRegMode(true)}>➕ Register This Dog</button>
+            </div>
+          )}
+
+          {/* Registration form */}
           {registerMode&&!saved&&(
-            <div className="card">
-              <div className="card-title">🐾 Register Unknown Dog</div>
-              <div className="form-group" style={{marginBottom:12}}>
-                <label className="form-label">Assign a Name</label>
-                <input className="form-input" value={newName} onChange={e=>setNewName(e.target.value)} placeholder="e.g. Spotty"/>
-              </div>
-              <div className="btn-row">
-                <button className="btn btn-primary" onClick={registerNew} disabled={!newName.trim()||regLoading}>
-                  {regLoading?<><span className="spinner"/>Saving...</>:'✅ Register & Save'}
-                </button>
-                <button className="btn btn-outline" onClick={()=>setRegMode(false)}>Cancel</button>
-              </div>
-            </div>
+            <DogForm
+              prefillImg={imgSrc}
+              onSave={handleRegister}
+              onCancel={()=>setRegMode(false)}
+              title="Register New Dog"
+            />
           )}
-          {saved&&<div className="alert alert-green"><span>✅</span><span>Saved to Flask backend and database.</span></div>}
+          {regLoading&&<div className="alert alert-warn"><span className="spinner"/>Saving to Neon DB...</div>}
+          {saved&&<div className="alert alert-green"><span>✅</span><span><strong>{savedName}</strong> registered and embedding saved to Neon. Anyone on the platform can now identify this dog.</span></div>}
+
           <div className="card" style={{marginTop:16}}>
             <div className="card-title">ℹ Model Info</div>
             <div className="model-prompt">
               Backbone: ResNet50 (ImageNet pretrained)<br/>
               Loss: Triplet Loss (margin=0.3)<br/>
               Embedding: 128-dim · L2-normalized<br/>
-              Metric: Euclidean distance<br/>
-              Threshold: EER-calibrated (auto-loaded)<br/>
-              New dogs: no retraining needed
+              Metric: Euclidean distance (avg per dog)<br/>
+              Storage: Neon PostgreSQL (cloud)<br/>
+              Threshold: EER-calibrated (auto-loaded)
             </div>
           </div>
         </div>
@@ -442,27 +425,28 @@ function ScanPage({dogs, setDogs}) {
   );
 }
 
+// ── Dashboard Page ────────────────────────────────────────────────────────────
 function DashboardPage({dogs}) {
   const total=dogs.length, vaccinated=dogs.filter(d=>d.vaccinated).length;
-  const overdue=dogs.filter(d=>dueStatus(d.rabiesVaccDue)==='overdue'||dueStatus(d.nextCheckup)==='overdue').length;
-  const dueSoon=dogs.filter(d=>(dueStatus(d.rabiesVaccDue)==='soon'||dueStatus(d.nextCheckup)==='soon')&&dueStatus(d.rabiesVaccDue)!=='overdue').length;
+  const overdue=dogs.filter(d=>dueStatus(d.rabies_vacc_due)==='overdue'||dueStatus(d.next_checkup)==='overdue').length;
+  const dueSoon=dogs.filter(d=>(dueStatus(d.rabies_vacc_due)==='soon'||dueStatus(d.next_checkup)==='soon')&&dueStatus(d.rabies_vacc_due)!=='overdue').length;
   const alerts=dogs.flatMap(d=>{
     const a=[];
     if(!d.vaccinated) a.push({type:'red',dog:d.name,msg:'Not vaccinated — rabies risk.'});
     else {
-      const rs=dueStatus(d.rabiesVaccDue);
-      if(rs==='overdue') a.push({type:'red',dog:d.name,msg:`Rabies overdue (was ${formatDate(d.rabiesVaccDue)}).`});
-      if(rs==='soon')    a.push({type:'warn',dog:d.name,msg:`Rabies due ${formatDate(d.rabiesVaccDue)}.`});
+      const rs=dueStatus(d.rabies_vacc_due);
+      if(rs==='overdue') a.push({type:'red',dog:d.name,msg:`Rabies overdue (was ${formatDate(d.rabies_vacc_due)}).`});
+      if(rs==='soon')    a.push({type:'warn',dog:d.name,msg:`Rabies due ${formatDate(d.rabies_vacc_due)}.`});
     }
-    const cs=dueStatus(d.nextCheckup);
-    if(cs==='overdue') a.push({type:'red',dog:d.name,msg:`Checkup overdue (was ${formatDate(d.nextCheckup)}).`});
-    if(cs==='soon')    a.push({type:'warn',dog:d.name,msg:`Checkup due ${formatDate(d.nextCheckup)}.`});
+    const cs=dueStatus(d.next_checkup);
+    if(cs==='overdue') a.push({type:'red',dog:d.name,msg:`Checkup overdue (was ${formatDate(d.next_checkup)}).`});
+    if(cs==='soon')    a.push({type:'warn',dog:d.name,msg:`Checkup due ${formatDate(d.next_checkup)}.`});
     return a;
   });
   return (
     <div>
       <div className="section-h">🐾 Rabies Prevention Dashboard</div>
-      <div className="section-sub">Overview of all registered dogs in the monitored area.</div>
+      <div className="section-sub">Live counts from Neon database — shared across all platform users.</div>
       <div className="stats-row">
         <div className="stat-card"><div className="stat-label">Registered</div><div className="stat-value">{total}</div></div>
         <div className="stat-card"><div className="stat-label">Vaccinated</div><div className="stat-value green">{vaccinated}</div></div>
@@ -471,54 +455,86 @@ function DashboardPage({dogs}) {
       </div>
       {alerts.length>0&&<div className="card"><div className="card-title">🚨 Action Required</div>{alerts.map((a,i)=><div key={i} className={`alert alert-${a.type==='red'?'red':'warn'}`}><span>{a.type==='red'?'🚨':'⚠️'}</span><span><strong>{a.dog}</strong> — {a.msg}</span></div>)}</div>}
       <div className="card">
-        <div className="card-title">📋 All Registered Dogs</div>
+        <div className="card-title">📋 All Registered Dogs — Neon DB</div>
         <table style={{width:'100%',borderCollapse:'collapse',fontSize:13}}>
           <thead><tr style={{color:'var(--muted)',fontSize:11,textTransform:'uppercase',letterSpacing:1}}>
-            {['Name','Breed','Area','Rabies','Due Date','Last Seen'].map(h=><th key={h} style={{textAlign:'left',padding:'6px 10px',borderBottom:'1px solid var(--border)'}}>{h}</th>)}
+            {['#','Name','Breed','Area','Rabies','Due Date'].map(h=><th key={h} style={{textAlign:'left',padding:'6px 10px',borderBottom:'1px solid var(--border)'}}>{h}</th>)}
           </tr></thead>
           <tbody>{dogs.map(d=>{
-            const rs=d.vaccinated?dueStatus(d.rabiesVaccDue):'none';
-            const lastEnc=d.encounters?.[d.encounters.length-1];
+            const rs=d.vaccinated?dueStatus(d.rabies_vacc_due):'none';
             return(<tr key={d.id} style={{borderBottom:'1px solid var(--border)'}}>
+              <td style={{padding:'10px',color:'var(--muted)',fontSize:11,fontFamily:"'Source Code Pro',monospace"}}>{d.id}</td>
               <td style={{padding:'10px'}}><strong>{d.name}</strong></td>
               <td style={{padding:'10px',color:'var(--muted)'}}>{d.breed}</td>
-              <td style={{padding:'10px',color:'var(--muted)'}}>{d.area}</td>
+              <td style={{padding:'10px',color:'var(--muted)'}}>{d.area||'—'}</td>
               <td style={{padding:'10px'}}>
                 {rs==='overdue'&&<span className="tag tag-red">⚠ Overdue</span>}
                 {rs==='soon'&&<span className="tag tag-amber">⏰ Due Soon</span>}
                 {rs==='ok'&&<span className="tag tag-green">✓ OK</span>}
                 {rs==='none'&&<span className="tag tag-red">✗ None</span>}
               </td>
-              <td style={{padding:'10px',fontFamily:"'Source Code Pro',monospace",fontSize:12}}>{formatDate(d.rabiesVaccDue)}</td>
-              <td style={{padding:'10px',color:'var(--muted)',fontSize:12}}>{lastEnc?formatDate(lastEnc.date):'—'}</td>
+              <td style={{padding:'10px',fontFamily:"'Source Code Pro',monospace",fontSize:12}}>{formatDate(d.rabies_vacc_due)}</td>
             </tr>);
           })}</tbody>
         </table>
-        {dogs.length===0&&<div style={{textAlign:'center',padding:40,color:'var(--muted)'}}>No dogs registered yet.</div>}
+        {dogs.length===0&&<div style={{textAlign:'center',padding:40,color:'var(--muted)'}}>No dogs in Neon DB yet. Register one via the Scan tab.</div>}
       </div>
     </div>
   );
 }
 
-// Root App 
+// ── Root App ──────────────────────────────────────────────────────────────────
 function App() {
-  const [tab,setTab]           = useState('scan');
-  const [dogs,setDogs]         = useState(DEMO_DOGS);
-  const [selectedDog,setSel]   = useState(null);
-  const [editingDog,setEditing] = useState(null);
-  const [addingNew,setAdding]  = useState(false);
+  const [tab,setTab]              = useState('scan');
+  const [dogs,setDogs]            = useState([]);
+  const [dogsLoading,setDLoading] = useState(true);
+  const [selectedDog,setSel]      = useState(null);
+  const [fullDog,setFullDog]      = useState(null);
+  const [addingNew,setAdding]     = useState(false);
 
-  const saveDog = form => {
-    if(editingDog) { setDogs(prev=>prev.map(d=>d.id===editingDog.id?{...editingDog,...form}:d)); setSel(s=>s?.id===editingDog.id?{...editingDog,...form}:s); }
-    else { const nd={...form,id:`d${Date.now()}`,encounters:[]}; setDogs(prev=>[...prev,nd]); setSel(nd); }
-    setEditing(null); setAdding(false); setTab('dogs');
+  const loadDogs = async () => {
+    setDLoading(true);
+    try {
+      const list = await fetchDogs();
+      setDogs(list);
+    } catch(e) {
+      console.error('Failed to load dogs:', e);
+    } finally {
+      setDLoading(false);
+    }
+  };
+
+  useEffect(() => { loadDogs(); }, []);
+
+  const selectDog = async (dog) => {
+    setSel(dog);
+    setTab('dogs');
+    setAdding(false);
+    try {
+      const full = await fetchDogProfile(dog.id);
+      setFullDog(full);
+    } catch(e) {
+      setFullDog(dog); // fallback
+    }
+  };
+
+  const onDogRegistered = () => {
+    loadDogs();
+    setTab('dogs');
   };
 
   const dogStatus = d => {
     if(!d.vaccinated) return 'alert';
-    if(dueStatus(d.rabiesVaccDue)==='overdue'||dueStatus(d.nextCheckup)==='overdue') return 'alert';
-    if(dueStatus(d.rabiesVaccDue)==='soon'||dueStatus(d.nextCheckup)==='soon') return 'warn';
+    if(dueStatus(d.rabies_vacc_due)==='overdue'||dueStatus(d.next_checkup)==='overdue') return 'alert';
+    if(dueStatus(d.rabies_vacc_due)==='soon'||dueStatus(d.next_checkup)==='soon') return 'warn';
     return 'ok';
+  };
+
+  const handleAddSave = async (formData) => {
+    // "Add New Dog" from sidebar — no image, just profile
+    // For now just reload; proper flow requires an image for the embedding
+    setAdding(false);
+    alert('To register a new dog, please use the Scan tab — it captures both the photo and details together.');
   };
 
   return (
@@ -526,7 +542,7 @@ function App() {
       <header className="header">
         <div className="logo">
           <span style={{fontSize:28}}>🐕</span>
-          <div><div className="logo-text">DogGuard</div><div className="logo-sub">Canine Health Monitor · Rabies Prevention</div></div>
+          <div><div className="logo-text">DogGuard</div><div className="logo-sub">Canine Health Monitor · Neon Cloud DB</div></div>
         </div>
         <nav className="nav">
           {[['scan','🔍 Scan'],['dogs','🐾 Dogs'],['dashboard','📊 Dashboard']].map(([id,label])=>(
@@ -536,25 +552,28 @@ function App() {
       </header>
       <div className="main">
         <aside className="sidebar">
-          <div className="sidebar-title">Registered Dogs ({dogs.length})</div>
+          <div className="sidebar-title">
+            {dogsLoading?'Loading from Neon…':`Neon DB — ${dogs.length} dog${dogs.length!==1?'s':''}`}
+          </div>
           {dogs.map(d=>(
-            <div key={d.id} className={`dog-item ${selectedDog?.id===d.id?'selected':''}`} onClick={()=>{setSel(d);setTab('dogs');setAdding(false);setEditing(null);}}>
-              <div className="dog-avatar">{d.photoUrl?<img src={d.photoUrl} alt={d.name}/>:'🐕'}</div>
+            <div key={d.id} className={`dog-item ${selectedDog?.id===d.id?'selected':''}`} onClick={()=>selectDog(d)}>
+              <div className="dog-avatar">{d.photo_url?<img src={d.photo_url} alt={d.name}/>:'🐕'}</div>
               <div className="dog-info">
                 <div className="dog-name">{d.name}</div>
-                <div className="dog-status"><span className={`status-dot status-${dogStatus(d)}`}/>{d.breed}</div>
+                <div className="dog-status"><span className={`status-dot status-${dogStatus(d)}`}/>{d.breed||'Unknown'}</div>
               </div>
             </div>
           ))}
-          <button className="add-dog-btn" onClick={()=>{setAdding(true);setEditing(null);setSel(null);setTab('dogs');}}>+ Add New Dog</button>
+          {dogs.length===0&&!dogsLoading&&<div style={{color:'var(--muted)',fontSize:12,padding:'8px',textAlign:'center'}}>No dogs yet.<br/>Scan a photo to register.</div>}
+          <button className="add-dog-btn" onClick={()=>setTab('scan')}>+ Add via Scan</button>
         </aside>
         <main className="content">
-          {tab==='scan'&&<ScanPage dogs={dogs} setDogs={setDogs}/>}
+          {tab==='scan'&&<ScanPage onDogRegistered={onDogRegistered}/>}
           {tab==='dashboard'&&<DashboardPage dogs={dogs}/>}
           {tab==='dogs'&&(
-            (addingNew||editingDog)
-              ?<DogForm dog={editingDog} onSave={saveDog} onCancel={()=>{setAdding(false);setEditing(null);}}/>
-              :<DogProfile dog={selectedDog?dogs.find(d=>d.id===selectedDog.id):null} onEdit={d=>{setEditing(d);setAdding(false);}}/>
+            addingNew
+              ?<DogForm onSave={handleAddSave} onCancel={()=>setAdding(false)} title="Register New Dog"/>
+              :<DogProfile dog={selectedDog?fullDog:null}/>
           )}
         </main>
       </div>
@@ -566,4 +585,3 @@ ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
 </script>
 </body>
 </html>
-
