@@ -1,0 +1,7 @@
+.git
+.env
+myenv
+__pycache__
+*.pyc
+embeddings_db.pkl
+migrate_pkl.py
